@@ -7,13 +7,15 @@ the single outbound consumer endpoint.
 from __future__ import annotations
 
 import logging
+import wave
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from src.encoder import AudioPipeline
 from src.engine import IngestionWorker
-from src.inputs import FileReplayInput, HttpChunkedStreamInput, LiveWebSocketInput
+from src.inputs import ingest_file_replay, ingest_http_stream, ingest_websocket
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,6 +27,15 @@ app = FastAPI(title="Voice Ingestion Worker")
 worker = IngestionWorker()
 
 
+def _replay_pipeline(file_path: Path) -> AudioPipeline:
+    """Builds an AudioPipeline matched to a WAV file's actual sample rate
+    and channel count, so the replay source is normalized correctly
+    regardless of the file's native format.
+    """
+    with wave.open(str(file_path), "rb") as wav:
+        return AudioPipeline(source_rate=wav.getframerate(), source_channels=wav.getnchannels())
+
+
 @app.get("/")
 async def health_check() -> JSONResponse:
     return JSONResponse({"status": "ok", "consumers": worker.consumer_count})
@@ -33,37 +44,24 @@ async def health_check() -> JSONResponse:
 @app.websocket("/ingest/live")
 async def ingest_live(websocket: WebSocket) -> None:
     """Realtime packetized audio input."""
-    await websocket.accept()
-    handler = LiveWebSocketInput(worker)
-
-    async def packets():
-        try:
-            while True:
-                yield await websocket.receive_bytes()
-        except WebSocketDisconnect:
-            return
-
-    try:
-        await handler.run(packets())
-    finally:
-        logger.info("live ingest connection closed")
+    pipeline = AudioPipeline()
+    await ingest_websocket(websocket, worker, pipeline)
 
 
 @app.post("/ingest/stream")
 async def ingest_stream(request: Request) -> JSONResponse:
     """HTTP chunked streaming audio input."""
-    handler = HttpChunkedStreamInput(worker)
-    await handler.run(request.stream())
+    pipeline = AudioPipeline()
+    await ingest_http_stream(request, worker, pipeline)
     return JSONResponse({"status": "accepted"})
 
 
 @app.post("/ingest/replay")
-async def ingest_replay(file_path: str | None = None) -> JSONResponse:
-    """Triggers the file replay engine (defaults to data/sample.wav)."""
-    target = Path(file_path) if file_path else DEFAULT_REPLAY_FILE
-    handler = FileReplayInput(worker, target)
-    await handler.run()
-    return JSONResponse({"status": "replay started", "file": str(target)})
+async def ingest_replay() -> JSONResponse:
+    """Triggers the file replay engine (hardcoded to data/sample.wav)."""
+    pipeline = _replay_pipeline(DEFAULT_REPLAY_FILE)
+    await ingest_file_replay(str(DEFAULT_REPLAY_FILE), worker, pipeline)
+    return JSONResponse({"status": "replay finished", "file": str(DEFAULT_REPLAY_FILE)})
 
 
 @app.websocket("/stream")

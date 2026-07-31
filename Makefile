@@ -1,13 +1,9 @@
 .DEFAULT_GOAL := image
-IMAGE_NAME := voice-ingestion-worker
 
-.PHONY: image run clean
+.PHONY: image run
 
 image:
-	docker build -t $(IMAGE_NAME) .
+	docker build -t voice-ingestion-worker .
 
-run: image
-	docker run --rm -p 8000:8000 $(IMAGE_NAME)
-
-clean:
-	docker rmi -f $(IMAGE_NAME)
+run:
+	docker run -p 8000:8000 voice-ingestion-worker

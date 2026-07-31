@@ -13,6 +13,8 @@ import av
 import numpy as np
 import opuslib
 
+from src.rfc2198 import wrap_rfc2198
+
 logger = logging.getLogger(__name__)
 
 TARGET_SAMPLE_RATE = 48_000
@@ -65,3 +67,57 @@ class OpusEncoder:
         if pcm.dtype != np.int16:
             raise ValueError("pcm must be int16")
         return self._encoder.encode(pcm.tobytes(), self._frame_samples)
+
+
+class AudioPipeline:
+    """Normalizes, encodes, and RFC 2198-wraps one ingestion stream.
+
+    Owns all per-stream state: the resampler, the Opus encoder, a buffer for
+    PCM that hasn't yet accumulated into a full 20ms frame, and the previous
+    Opus frame carried as redundancy. One instance per connection/source --
+    state must not be shared across streams.
+    """
+
+    def __init__(
+        self,
+        source_rate: int = TARGET_SAMPLE_RATE,
+        source_channels: int = TARGET_CHANNELS,
+    ) -> None:
+        self._source_rate = source_rate
+        self._source_channels = source_channels
+        self._layout = "mono" if source_channels == 1 else "stereo"
+        self._normalizer = AudioNormalizer()
+        self._encoder = OpusEncoder()
+        self._previous_opus: bytes | None = None
+        self._pcm_buffer = np.empty(0, dtype=np.int16)
+
+    def process_chunk(self, raw_audio_bytes: bytes) -> list[bytes]:
+        """Normalize + encode + RFC 2198-wrap one chunk of raw PCM audio.
+
+        `raw_audio_bytes` is interleaved int16 PCM at `source_rate` /
+        `source_channels`. Any samples left over after the last full 20ms
+        Opus frame are buffered and prepended to the next call, so the
+        returned list may be empty (chunk too small) or contain several
+        packets (chunk spans multiple 20ms frames).
+        """
+        samples = np.frombuffer(raw_audio_bytes, dtype=np.int16)
+        samples = samples.reshape(1, -1) if self._source_channels == 1 else samples.reshape(-1, self._source_channels).T
+
+        raw_frame = av.AudioFrame.from_ndarray(samples, format="s16", layout=self._layout)
+        raw_frame.sample_rate = self._source_rate
+
+        for resampled in self._normalizer.normalize(raw_frame):
+            pcm = resampled.to_ndarray().reshape(-1).astype(np.int16)
+            self._pcm_buffer = np.concatenate([self._pcm_buffer, pcm])
+
+        packets: list[bytes] = []
+        while len(self._pcm_buffer) >= OPUS_FRAME_SAMPLES:
+            frame, self._pcm_buffer = (
+                self._pcm_buffer[:OPUS_FRAME_SAMPLES],
+                self._pcm_buffer[OPUS_FRAME_SAMPLES:],
+            )
+            opus_packet = self._encoder.encode(frame)
+            packets.append(wrap_rfc2198(opus_packet, self._previous_opus))
+            self._previous_opus = opus_packet
+
+        return packets

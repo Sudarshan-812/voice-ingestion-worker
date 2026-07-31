@@ -63,3 +63,36 @@ def build_packet(redundant_blocks: list[RedundantBlock], primary_payload_type: i
 
     payloads = b"".join(block.payload for block in redundant_blocks) + primary_payload
     return headers + payloads
+
+
+# --- Depth-1 convenience wrapper for the Opus pipeline ---------------------
+#
+# The encoder only ever carries one frame of lookback (the previous 20ms
+# Opus frame), so it doesn't need the general N-block machinery above.
+# See DECISIONS.md ("Why RFC 2198 Redundancy") for why depth-1 was chosen.
+
+OPUS_PAYLOAD_TYPE = 111
+OPUS_FRAME_MS = 20
+OPUS_SAMPLE_RATE = 48_000
+REDUNDANCY_TIMESTAMP_OFFSET = OPUS_SAMPLE_RATE * OPUS_FRAME_MS // 1000  # 960 samples
+
+
+def wrap_rfc2198(primary_payload: bytes, redundant_payload: bytes | None = None) -> bytes:
+    """Wrap one Opus frame as an RFC 2198 payload, with an optional single
+    redundant (previous) frame.
+
+    With `redundant_payload=None`: just the 1-byte primary header (F=0, PT)
+    followed by the primary payload -- no redundancy carried.
+
+    With a `redundant_payload`: a 4-byte redundant header (F=1, PT, the fixed
+    20ms/48kHz timestamp offset, and the redundant block's length) followed by
+    the 1-byte primary header, then the redundant data, then the primary data.
+    """
+    if redundant_payload is None:
+        return pack_primary_header(OPUS_PAYLOAD_TYPE) + primary_payload
+
+    redundant_header = pack_redundant_header(
+        OPUS_PAYLOAD_TYPE, REDUNDANCY_TIMESTAMP_OFFSET, len(redundant_payload)
+    )
+    primary_header = pack_primary_header(OPUS_PAYLOAD_TYPE)
+    return redundant_header + primary_header + redundant_payload + primary_payload

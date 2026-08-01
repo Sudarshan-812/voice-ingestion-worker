@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
-from src.encoder import AudioPipeline
+from src.encoder import TARGET_CHANNELS, TARGET_SAMPLE_RATE, AudioPipeline
 from src.engine import IngestionWorker
 from src.inputs import ingest_file_replay, ingest_http_stream, ingest_websocket
 
@@ -42,16 +42,37 @@ async def health_check() -> JSONResponse:
 
 
 @app.websocket("/ingest/live")
-async def ingest_live(websocket: WebSocket) -> None:
-    """Realtime packetized audio input."""
-    pipeline = AudioPipeline()
+async def ingest_live(
+    websocket: WebSocket,
+    sample_rate: int = TARGET_SAMPLE_RATE,
+    channels: int = TARGET_CHANNELS,
+) -> None:
+    """Realtime packetized audio input.
+
+    `sample_rate`/`channels` describe the raw PCM the caller is about to
+    send (e.g. a telephony bridge dialing in at 8kHz mono) so the pipeline's
+    resampler is built for the actual source format instead of assuming
+    it already matches the 48kHz mono target. Callers already at the
+    target format can omit both. See DECISIONS.md, "Sample-Rate Negotiation
+    on Live Inputs".
+    """
+    pipeline = AudioPipeline(source_rate=sample_rate, source_channels=channels)
     await ingest_websocket(websocket, worker, pipeline)
 
 
 @app.post("/ingest/stream")
-async def ingest_stream(request: Request) -> JSONResponse:
-    """HTTP chunked streaming audio input."""
-    pipeline = AudioPipeline()
+async def ingest_stream(
+    request: Request,
+    sample_rate: int = TARGET_SAMPLE_RATE,
+    channels: int = TARGET_CHANNELS,
+) -> JSONResponse:
+    """HTTP chunked streaming audio input.
+
+    Same negotiation as `/ingest/live`: pass `?sample_rate=&channels=` to
+    describe the raw PCM in the request body when it isn't already 48kHz
+    mono.
+    """
+    pipeline = AudioPipeline(source_rate=sample_rate, source_channels=channels)
     await ingest_http_stream(request, worker, pipeline)
     return JSONResponse({"status": "accepted"})
 

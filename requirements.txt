@@ -5,3 +5,4 @@ av==12.2.0
 opuslib==3.0.1
 numpy==1.26.4
 python-multipart==0.0.9
+psutil==6.0.0

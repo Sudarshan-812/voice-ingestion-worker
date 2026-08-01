@@ -12,41 +12,41 @@ loss demonstration.
 ## Architecture
 
 ```
-ingest_websocket ---\
-ingest_http_stream ---+--> AudioPipeline (per source) --> IngestionWorker.broadcast
-ingest_file_replay --/                                          |
+ingest_websocket   -\
+ingest_http_stream  -+-> AudioPipeline (per source) -> IngestionWorker.broadcast
+ingest_file_replay -/                                          |
                                                      fan-out to N bounded queues
-                                                                  |
-                                                    consumer 1 ... consumer N (/stream)
+                                                                 |
+                                                   consumer 1 ... consumer N (/stream)
 ```
 
-- **`src/inputs.py`** -- three ingestion handlers, one per source. Each owns
+- **`src/inputs.py`**: three ingestion handlers, one per source. Each owns
   its own `AudioPipeline` instance (no shared state across streams) and
   pushes finished packets into the single `IngestionWorker`.
-- **`src/encoder.py`** -- `AudioPipeline`: PyAV resampling to 48kHz mono
+- **`src/encoder.py`**: `AudioPipeline`, PyAV resampling to 48kHz mono
   s16, 20ms framing, Opus encoding.
-- **`src/rfc2198.py`** -- byte-level RFC 2198 packer (depth-1: current
-  frame + previous frame).
-- **`src/engine.py`** -- `IngestionWorker`: owns the set of attached
+- **`src/rfc2198.py`**: byte-level RFC 2198 packer (depth-1, current
+  frame plus previous frame).
+- **`src/engine.py`**: `IngestionWorker`, owns the set of attached
   consumer queues and the bounded-queue/drop backpressure policy.
-- **`src/main.py`** -- FastAPI wiring for the four HTTP/WS endpoints below.
+- **`src/main.py`**: FastAPI wiring for the four HTTP/WS endpoints below.
 
 ## Ingestion Sources
 
 Three sources, chosen because each stresses a different part of the
 pipeline rather than just arriving through a different pipe:
 
-1. **`WS /ingest/live`** -- realtime packetized audio pushed frame-by-frame
+1. **`WS /ingest/live`**: realtime packetized audio pushed frame-by-frame
    over a WebSocket (e.g. a telephony bridge or browser client). This is
    the "live, arriving over the wire" source required by the brief: the
    worker has no control over pacing and must keep up with whatever
    cadence the caller sends at.
-2. **`POST /ingest/stream`** -- audio uploaded as an HTTP chunked-transfer
+2. **`POST /ingest/stream`**: audio uploaded as an HTTP chunked-transfer
    body. Same live-arrival constraint as the WS source, but through a
    request-response shaped transport instead of a persistent bidirectional
-   socket -- exercises `request.stream()` backpressure instead of
+   socket, exercising `request.stream()` backpressure instead of
    WebSocket framing.
-3. **`POST /ingest/replay`** -- replays `data/sample.wav` from disk,
+3. **`POST /ingest/replay`**: replays `data/sample.wav` from disk,
    throttled to real-time pacing (sleeps between chunks for exactly the
    wall-clock duration of the audio just sent). This is the "archive
    someone wants replayed through the live path" source, and the one
@@ -54,7 +54,7 @@ pipeline rather than just arriving through a different pipe:
    would blast it through the pipeline as fast as disk I/O allows, which
    is not what a live consumer downstream expects.
 
-All three converge on the same `AudioPipeline.process_chunk()` ->
+All three converge on the same `AudioPipeline.process_chunk()` then
 `IngestionWorker.broadcast()` path once bytes are in hand.
 
 **Sample rate / channel handling:** `/ingest/live` and `/ingest/stream`
@@ -63,18 +63,18 @@ PCM the caller is about to send (default: 48000/mono, i.e. already at the
 target format). `/ingest/replay` reads the WAV header directly. See
 DECISIONS.md, "Sample-Rate Negotiation on Live Inputs".
 
-All sources are expected to send raw interleaved 16-bit PCM. Encoded/
+All sources are expected to send raw interleaved 16-bit PCM. Encoded or
 containerized input (e.g. a browser sending WebM/Opus directly) is out of
-scope for this submission -- see "Rejected Alternatives" in DECISIONS.md.
+scope for this submission; see "Rejected Alternatives" in DECISIONS.md.
 
 ## Outbound Stream / Consumer Contract
 
-- `WS /stream` -- consumers connect and receive a continuous sequence of
+- `WS /stream`: consumers connect and receive a continuous sequence of
   binary WebSocket frames, each one RFC 2198-wrapped Opus packet (20ms of
   audio, 48kHz mono, plus the previous frame as redundancy).
 - No handshake, no out-of-band metadata: the payload type (111, dynamic)
   and framing are fixed and documented in `src/rfc2198.py`.
-- **Late joiners** hear nothing before the moment they attach -- there is
+- **Late joiners** hear nothing before the moment they attach: there is
   no priming buffer. The first packet they receive after connecting is a
   normal in-sequence packet; its redundant block (if any) points at a
   frame they never saw, which is simply ignored on decode.
@@ -110,7 +110,7 @@ it produces a runnable image with nothing preinstalled and no manual steps.
 
 Everything is currently a module-level constant rather than an environment
 variable (`TARGET_SAMPLE_RATE`, `TARGET_CHANNELS`, `OPUS_FRAME_MS` in
-`src/encoder.py`; `CONSUMER_QUEUE_MAXSIZE` in `src/engine.py`) -- there was
+`src/encoder.py`; `CONSUMER_QUEUE_MAXSIZE` in `src/engine.py`). There was
 no deployment surface in scope for this exercise that needed them
 runtime-configurable. If/when this needs to run against more than one
 outbound format or loss profile, these are the knobs to promote to env
@@ -118,7 +118,7 @@ vars first.
 
 ## Operational Notes
 
-- `GET /` returns `{"status": "ok", "consumers": N}` -- a cheap liveness
+- `GET /` returns `{"status": "ok", "consumers": N}`: a cheap liveness
   probe that also surfaces current fan-out width, useful for confirming
   consumer attach/detach is being tracked correctly under load.
 - A stalled or slow consumer never blocks ingestion or other consumers:
@@ -126,7 +126,7 @@ vars first.
   (maxsize=100) per-consumer queue and silently drops the packet for that
   consumer only if it's full. See "Why Bounded Queues + Drop Policy" in
   DECISIONS.md.
-- The worker holds no persistent state across restarts -- there's nothing
+- The worker holds no persistent state across restarts: there's nothing
   to migrate or replay on deploy; a restarted worker just starts with zero
   consumers and waits for ingestion sources to reconnect.
 
@@ -137,7 +137,7 @@ WebSocket connections to `/stream`, each with a staggered start time and
 connected duration, so it exercises attach/detach churn against
 `IngestionWorker` rather than a single steady connection. Each consumer also
 unwraps the RFC 2198 payload back to the primary Opus frame and feeds it to
-`opuslib.Decoder`, proving the encode -> wrap -> broadcast -> unwrap -> decode
+`opuslib.Decoder`, proving the encode, wrap, broadcast, unwrap, decode
 round trip is byte-correct, not just that packets arrive.
 
 To run it:
@@ -154,18 +154,19 @@ individual mock consumers attach and detach.
 ## Measurements
 
 `scripts/measure.py` captures three things from a live worker: end-to-end
-latency (ingest -> normalize -> encode -> RFC 2198 wrap -> fan-out ->
-consumer receive) as a distribution rather than an average, CPU usage
-under N concurrent replay streams, and packets-received-per-consumer as
-consumer count rises.
+latency (ingest, normalize, encode, RFC 2198 wrap, fan-out, consumer
+receive) as a distribution rather than an average, CPU usage under N
+concurrent replay streams, and packets-received-per-consumer as consumer
+count rises.
 
 ```bash
 uvicorn src.main:app &          # note the PID
 python scripts/measure.py --pid <worker_pid> --consumers 1,5,10,25,50
 ```
 
-*Results pending a local environment with a working `libopus` -- see
-`DECISIONS.md` if this section still says "pending" by submission time.*
+See `MEASUREMENTS.md` for results (latency distribution, CPU per stream,
+and fan-out behavior up to 50 concurrent consumers) and the methodology
+used to capture them.
 
 ## Packet Loss Experiment
 
